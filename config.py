@@ -27,4 +27,4 @@ BUTTON_PIN = 4              # GPIO4 (physical pin 7), other leg to GND (physical
 FLASH_DURATION_SECONDS = 0.3
 
 # --- Preloaded images ---
-IMAGE_BANK_DIR = "/home/pi/stenopeic_images"   # images you import onto the Pi
+IMAGE_BANK_DIR = "/home/ctorres/stenopeic_images"   # images you import onto the Pi
