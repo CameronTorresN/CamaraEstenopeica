@@ -1,80 +1,60 @@
-"""
-Wrapper around the 2.8" ST7789 SPI display.
+"""ST7789 display driver (hardware SPI). Backlight is off except during a flash."""
 
-This wiring puts SCL/CS on GPIOs that aren't the Pi's hardware SPI0
-clock/CS lines, so it talks over software (bit-banged) SPI via bitbangio
-rather than board.SPI().
+import time
 
-Requires: adafruit-circuitpython-rgb-display, adafruit-blinka, Pillow
-    pip install adafruit-circuitpython-rgb-display adafruit-blinka Pillow
-"""
-
-import bitbangio
 import board
+import busio
 import digitalio
-from PIL import Image
 from adafruit_rgb_display import st7789
+from PIL import Image, ImageOps
 
 import config
 
 
 class Display:
     def __init__(self):
-        clock_pin = getattr(board, f"D{config.DISPLAY_CLOCK_PIN}")
-        mosi_pin = getattr(board, f"D{config.DISPLAY_MOSI_PIN}")
-        spi = bitbangio.SPI(clock=clock_pin, MOSI=mosi_pin)  # no MISO wired
+        self._backlight = digitalio.DigitalInOut(getattr(board, f"D{config.DISPLAY_BL_PIN}"))
+        self._backlight.direction = digitalio.Direction.OUTPUT
+        self._backlight.value = False  # dark at idle
 
-        cs_pin = digitalio.DigitalInOut(getattr(board, f"D{config.DISPLAY_CS_PIN}"))
-        dc_pin = digitalio.DigitalInOut(getattr(board, f"D{config.DISPLAY_DC_PIN}"))
-        rst_pin = digitalio.DigitalInOut(getattr(board, f"D{config.DISPLAY_RST_PIN}"))
-
-        self.panel = st7789.ST7789(
+        spi = busio.SPI(board.SCLK, MOSI=board.MOSI)
+        self._panel = st7789.ST7789(
             spi,
-            cs=cs_pin,
-            dc=dc_pin,
-            rst=rst_pin,
+            cs=digitalio.DigitalInOut(getattr(board, f"D{config.DISPLAY_CS_PIN}")),
+            dc=digitalio.DigitalInOut(getattr(board, f"D{config.DISPLAY_DC_PIN}")),
+            rst=digitalio.DigitalInOut(getattr(board, f"D{config.DISPLAY_RST_PIN}")),
             width=config.DISPLAY_WIDTH,
             height=config.DISPLAY_HEIGHT,
+            baudrate=config.DISPLAY_BAUDRATE,
             rotation=config.DISPLAY_ROTATION,
         )
-        self.width = self.panel.width
-        self.height = self.panel.height
+        self.width = self._panel.width
+        self.height = self._panel.height
+        self.clear()
 
-        # Optional PWM backlight, driven separately from the SPI panel itself.
-        self._backlight = None
-        if config.DISPLAY_BL_PIN is not None:
-            import RPi.GPIO as GPIO
-
-            GPIO.setmode(GPIO.BCM)
-            GPIO.setup(config.DISPLAY_BL_PIN, GPIO.OUT)
-            self._backlight = GPIO.PWM(config.DISPLAY_BL_PIN, 1000)
-            self._backlight.start(config.DISPLAY_BRIGHTNESS * 100)
-
-    def set_brightness(self, fraction):
-        """fraction: 0.0 (off) to 1.0 (full brightness)."""
-        if self._backlight is not None:
-            fraction = max(0.0, min(1.0, fraction))
-            self._backlight.ChangeDutyCycle(fraction * 100)
-
-    def show_image(self, image_path):
-        """Fit a preloaded image to the screen and display it."""
-        image = Image.open(image_path).convert("RGB")
-        image = self._fit_to_screen(image)
-        self.panel.image(image)
+    def _prepare(self, path):
+        img = Image.open(path).convert("RGB")
+        # Scale to cover the screen, then center-crop.
+        scale = max(self.width / img.width, self.height / img.height)
+        new_size = (round(img.width * scale), round(img.height * scale))
+        img = img.resize(new_size, Image.LANCZOS)
+        left = (img.width - self.width) // 2
+        top = (img.height - self.height) // 2
+        img = img.crop((left, top, left + self.width, top + self.height))
+        if config.INVERT_IMAGES:
+            img = ImageOps.invert(img)
+        return img
 
     def clear(self):
-        self.panel.image(Image.new("RGB", (self.width, self.height), (0, 0, 0)))
+        self._backlight.value = False
+        self._panel.image(Image.new("RGB", (self.width, self.height), (0, 0, 0)))
 
-    def _fit_to_screen(self, image):
-        img_ratio = image.width / image.height
-        screen_ratio = self.width / self.height
-        if img_ratio > screen_ratio:
-            new_height = self.height
-            new_width = int(new_height * img_ratio)
-        else:
-            new_width = self.width
-            new_height = int(new_width / img_ratio)
-        image = image.resize((new_width, new_height))
-        left = (new_width - self.width) / 2
-        top = (new_height - self.height) / 2
-        return image.crop((left, top, left + self.width, top + self.height))
+    def flash(self, path, duration=None):
+        """Draw the image while dark, light the backlight, then go dark again."""
+        duration = config.FLASH_DURATION_SECONDS if duration is None else duration
+        img = self._prepare(path)
+        self._panel.image(img)
+        self._backlight.value = True
+        time.sleep(duration)
+        self._backlight.value = False
+        self.clear()
